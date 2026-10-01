@@ -14,9 +14,10 @@
   <pre class="mermaid">{{ diagram }}</pre>
 </figure>
 
-<p class="dm-note">Test stage: relationships are currently maintained as a constant
-  list in <code>app.py</code>. Once the relationship syntax in DM page bodies
-  stabilizes, a live extractor will replace this list.</p>
+<p class="dm-note">Projected live from <code>wiki/data-models/</code> — one
+  class per DM page; edges from the <code>**Relationships.**</code> bullets and
+  sum-type <code>parent:</code> links (ADR-0018/0019). A missing target page
+  shows up as a ghost class.</p>
 {% endif %}
 
 {% if entities %}

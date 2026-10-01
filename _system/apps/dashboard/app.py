@@ -1533,21 +1533,139 @@ def _mermaid_goal_tree(vision: Page, objectives: list[Page]) -> str | None:
     return "\n".join(lines)
 
 
-def build_data_model_full_diagram() -> str | None:
-    """Full class diagram of every modelled entity.
+# --- data-model class diagram (req42 block 05) -----------------------------
+##
+## Like the context diagram, the data model is NOT stored as a diagram
+## (ADR-0018, ADR-0019): it is projected live from the typed edges the DM
+## pages already carry — one class per DM page, attributes from the
+## `**Attributes.**` bullet list, and relationships from the
+## `**Relationships.**` bullets (`- <verb> → [[DM-...]] · <cardinality> ·
+## <kind> · <mandatory?>`). Stereotypes (ADR-0019) map to mermaid annotations:
+## sum-type → `<<sum>>` (variants attach via `parent:` as `--|>` inheritance,
+## the closed-union marker), value-object → `<<value>>`. Dangling
+## relationship targets get a ghost node so the missing page is visible.
 
-    Projection from `wiki/data-models/` is not implemented yet; until it is,
-    the view renders its empty state rather than a stale hardcoded model.
-    `data_model.html` guards on `entities`, not on this diagram, so returning
-    None unconditionally is the whole contract — do not "fix" the guard.
+_DM_REL_BLOCK_RE = re.compile(
+    r"\*\*Relationships\.\*\*\s*\n(?P<body>.+?)"
+    r"(?=^\*\*[A-Za-z][^*\n]+?\.\*\*|^>\s*\[!|^##\s|\Z)",
+    re.DOTALL | re.MULTILINE,
+)
+_DM_REL_BULLET_RE = re.compile(r"^\s*-\s+(?P<rest>.+)$", re.MULTILINE)
+_DM_TARGET_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]+)?(?:\|([^\]]+))?\]\]")
+
+_DM_STEREO_ANNOTATION = {
+    "sum-type": "sum",
+    "value-object": "value",
+}
+
+
+def _dm_relationships(page: Page) -> list[dict]:
+    """Structured relationship edges from the `**Relationships.**` section:
+    one `{verb, target, label}` per `- verb → [[DM-...]] · ...` bullet."""
+    m = _DM_REL_BLOCK_RE.search(page.body)
+    if not m:
+        return []
+    out: list[dict] = []
+    for b in _DM_REL_BULLET_RE.finditer(m.group("body")):
+        text = " ".join(b.group("rest").split())
+        tm = _DM_TARGET_RE.search(text)
+        if not tm:
+            continue                          # prose bullet, no typed edge
+        target = tm.group(1).strip().split("/")[-1]
+        before = text[:tm.start()].strip()
+        verb = _clean_label(before.split("→")[0]) if "→" in before else before
+        after = text[tm.end():]
+        kinds = [k.strip().lower() for k in after.split("·") if k.strip()]
+        label = " ".join(k for k in kinds if k) or verb
+        out.append({"verb": verb, "target": target, "label": _clean_label(label)})
+    return out
+
+
+def _dm_mermaid_class(page: Page) -> str:
+    """The mermaid class block for one DM page: annotation first (stereotype,
+    ADR-0019), then the attributes from the `**Attributes.**` bullet list."""
+    cid = _diagram_node_id(page.id)
+    lines: list[str] = []
+    stereo = str(page.meta.get("stereotype") or "").strip().lower()
+    ann = _DM_STEREO_ANNOTATION.get(stereo)
+    if ann:
+        lines.append(f"    class {cid} {{")
+        lines.append(f"      <<{ann}>>")
+    else:
+        lines.append(f"    class {cid} {{")
+    for name in _extract_dm_attribute_names(page):
+        lines.append(f"      {name}")
+    lines.append("    }")
+    return "\n".join(lines)
+
+
+def build_data_model_full_diagram() -> str | None:
+    """Project a mermaid classDiagram from `wiki/data-models/` (ADR-0018/0019).
+
+    One class per DM page; relationships render as labelled arrows whose shape
+    follows the kind on the bullet — inheritance → `--|>`, composition →
+    `--*`, aggregation → `--o`, association → `-->`. A target that is no DM page
+    becomes a ghost class so the gap is visible instead of silently dropped.
+    Returns None when no DM pages exist (empty vault renders its empty state).
+    Pure and string-only, so the audit loop can reuse it outside a request.
     """
-    return None  # placeholder — a real projection is future work (ADR-0018 style)
+    pages = load_folder("data-models")
+    if not pages:
+        return None
+    by_stem = {p.stem: p for p in pages}
+    by_id = {p.id: p for p in pages}
+    classes: dict[str, Page] = {}
+    order: list[str] = []          # stable output order: page order, then ghosts
+
+    def cls_of(page: Page) -> str:
+        cid = _diagram_node_id(page.id)
+        if cid not in classes:
+            classes[cid] = page
+            order.append(cid)
+        return cid
+
+    edges: list[str] = []
+    for p in pages:
+        cls_of(p)
+    # sum-type variants attach via `parent:` (ADR-0019) — closed-union marker
+    for p in pages:
+        for raw in (p.meta.get("parent") or []):
+            tgt = _stem_of_link(raw)
+            parent = by_stem.get(tgt) or by_id.get(tgt)
+            if parent is None or parent is p:
+                continue
+            edges.append(f"    {cls_of(parent)} <|-- {cls_of(p)}")
+    for p in pages:
+        for rel in _dm_relationships(p):
+            tgt = rel["target"]
+            target = by_stem.get(tgt) or by_id.get(tgt)
+            if target is p:
+                continue
+            if target is not None:
+                tcls = cls_of(target)
+            else:
+                tcls = _diagram_node_id(tgt)
+                if tcls not in classes:
+                    classes[tcls] = None               # ghost: dangling target
+                    order.append(tcls)
+            label = rel["label"].replace('"', "'")
+            edges.append(f"    {cls_of(p)} --> {tcls} : {label}")
+    lines = ["classDiagram"]
+    for cid in order:
+        page = classes[cid]
+        if page is None:
+            lines.append(f"    class {cid}")
+            lines.append(f"    {cid} : missing DM page")
+        else:
+            lines.append(_dm_mermaid_class(page))
+    lines += edges
+    return "\n".join(lines)
 
 
 def build_data_model_kind_diagram() -> str | None:
     """Compact diagram for the home tile. See build_data_model_full_diagram().
     `index.html` guards the data-model tile on its entity count, not on this."""
-    return None  # placeholder — a real projection is future work (ADR-0018 style)
+    return build_data_model_full_diagram()
 
 
 # Section/callout extractors for the /data-model catalog: each DM page is
